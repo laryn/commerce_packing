@@ -1,0 +1,285 @@
+<?php 
+
+/**
+ * @file
+ * Handles main functionality for Commerce Packing module.
+ */
+
+/**
+ * Implements hook_menu().
+ */
+function commerce_packing_menu() {
+  $items = array();
+
+  $items['admin/commerce/config/packing'] = array(
+    'title' => 'Packing configuration',
+    'description' => 'Manage packing settings.',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('commerce_packing_overview_form'),
+    'access arguments' => array('administer shipping'),
+    'file' => 'commerce_packing.admin.inc',
+  );
+  return $items;
+}
+
+function commerce_packing_get_packages($order) {
+  require_once('libs/laff-pack.php');
+  
+  $containers = array();
+  $container_count = 0;
+  $containers[$container_count]['weight']['weight'] = 0;
+  $containers[$container_count]['total_value'] = 0;
+
+  $boxes = _commerce_packing_get_box_sizes();
+  $boxes_total = count(array_keys($boxes));
+
+  $topack_count = 0;
+
+  $order_wrapper = entity_metadata_wrapper('commerce_order', $order);
+  //Figure out # of packages & their sizes	
+  $line_items = $order_wrapper->commerce_line_items->value();
+  $products = _commerce_packing_get_product_list($line_items); //get a list of all products ordered by size
+  
+  // loop through products and find out the size box
+  // that they will all fit in
+  foreach($products AS $key => $product) {
+    $topack[$topack_count][] = array('length'=> $product['dimensions']['length'], 'width' => $product['dimensions']['width'], 'height' => $product['dimensions']['height'], 'weight' => $product['weight']);
+    
+    // loop through the boxes for find which one will fit the product(s)
+    foreach($boxes as $key => $box) {
+      $boxed = commerce_packing_test_fit($topack[$topack_count], $box);
+
+      // if item fits in container, pack it
+      if ($boxed == 'yes') {
+        $containers[$container_count]['products'] = $topack[$topack_count];
+        $containers[$container_count]['dimensions'] = $box;
+        $product_weight = physical_weight_convert($product['weight'], 'lb');
+        $containers[$container_count]['weight']['weight'] += $product_weight['weight'];
+        $containers[$container_count]['total_value'] += $product['value'];
+        break; 
+      } else if ($boxed == 'no' && $key == $boxes_total - 1) {
+        // the item doesn't fit in the container
+        // we need a new container (or it just doesn't fit) and
+        // we need to pack the item        
+        // ** This if statement is needed in case this item
+        // ** doesn't fit any containers
+        if (count(array_keys($topack[$topack_count])) > 1) { 
+          $container_count++;
+          $topack_count++;
+          $containers[$container_count]['weight']['weight'] = 0;
+          $containers[$container_count]['total_value'] = 0;
+          // get last item off of last topack 
+          // since it didn't fit in last container
+          $topack[$topack_count][] = array_pop ( $topack[$topack_count - 1] );
+        }
+        // loop through the boxes for find which one will fit the product(s)
+        foreach($boxes as $key => $box) {
+          $boxed = commerce_packing_test_fit($topack[$topack_count], $box);
+          if ($boxed == 'yes') {
+            $containers[$container_count]['products'] = $topack[$topack_count];
+            $containers[$container_count]['dimensions'] = $box;
+            $product_weight = physical_weight_convert($product['weight'], 'lb');
+            $containers[$container_count]['weight']['weight'] += $product_weight['weight'];
+            $containers[$container_count]['total_value'] += $product['value'];
+            break 2; 
+          } else if ($boxed == 'no' && $key == $boxes_total - 1) {
+            // the item we are trying to fit in a box
+            // does not fit any of our boxes
+            // so make the item a box itself.
+            $containers[$container_count]['products'] = $topack[$topack_count];
+            $containers[$container_count]['dimensions'] = array('length'=> $product['dimensions']['length'], 'width' => $product['dimensions']['width'], 'height' => $product['dimensions']['height'], 'unit' => 'in');
+            $product_weight = physical_weight_convert($product['weight'], 'lb');
+            $containers[$container_count]['weight']['weight'] += $product_weight['weight'];
+            $containers[$container_count]['total_value'] += $product['value'];           
+            // interate everything since next container will be new
+            $container_count++;
+            $topack_count++;
+            $containers[$container_count]['weight']['weight'] = 0;
+            $containers[$container_count]['total_value'] = 0;
+            break 2;
+          }
+        }
+      }
+
+    }
+ 
+  }
+
+  _commerce_packing_convert_product_weight($containers);
+
+  dsm($containers);
+  
+  return $containers;
+}
+
+/**
+ * Determines the weight to use for a product on an order. This is a slightly modified version of 
+ * commerce_physical_product_line_item_weight to get the weight of 1 product from the line item instead
+ * of the combined weight of all products.
+ *
+ * @param $line_item
+ *   A product line item whose weight should be determined.
+ *
+ * @return
+ *   A weight field value array representing the weight of the product line item
+ *   or NULL if none was found.
+ */
+
+function _commerce_packing_physical_product_weight($line_item) {
+  $line_item_wrapper = entity_metadata_wrapper('commerce_line_item', $line_item);
+  $weight = NULL;
+
+  // If the line item references a valid product...
+  if (!empty($line_item_wrapper->commerce_product)) {
+    $product = $line_item_wrapper->commerce_product->value();
+
+    if (!empty($product)) {
+      // If the product has a valid weight field...
+      $field_name = commerce_physical_entity_weight_field_name('commerce_product', $product);
+
+      if (!empty($field_name) && !empty($product->{$field_name})) {
+        // Extract the weight value from the product.
+        $product_wrapper = entity_metadata_wrapper('commerce_product', $product);
+        $weight = $product_wrapper->{$field_name}->value();
+        return $weight;
+      }
+      else {
+        return array('weight'=>0, 'unit'=>'lb');
+      }
+    }
+  }
+}
+
+function _commerce_packing_get_box_size($length, $width, $height) {
+  //get available box sizes
+  global $boxes;
+  $boxes = _commerce_packing_get_box_sizes();
+  
+   global $remaining_vol, $available_vol;
+   //dsm('remaining = '. $remaining_vol .', available = '. $available_vol);
+   foreach($boxes AS $id=>$box) {       
+      if($remaining_vol > $available_vol && $box['length'] >= $length && $box['width'] >= $width && $box['height'] >= $height) {
+          return $boxes[$id];
+       }
+     //if $remaining_vol <= $available_vol, look for a box that is large enough to hold everything that's left
+      elseif($remaining_vol <= $available_vol && $box['length']*$box['width']*$box['height'] >= $remaining_vol && $box['length'] >= $length && $box['width'] >= $width && $box['height'] >= $height) {
+          return $boxes[$id];
+       }     
+   }
+  //if no matching boxes are found, assume the item is a special case & return a box that is the size of the item
+   return array('length'=>$length, 'width'=>$width, 'height'=>$height);
+}
+
+function _commerce_packing_sort_boxes($a, $b) {
+  $vol_a = $a['length'] * $a['width'] * $a['height'];    
+  $vol_b = $b['length'] * $b['width'] * $b['height'];
+  
+  return $vol_a - $vol_b;
+}
+
+function _commerce_packing_sort_products($a, $b) {
+  $vol_a = $a['dimensions']['length'] * $a['dimensions']['width'] * $a['dimensions']['height'];    
+  $vol_b = $b['dimensions']['length'] * $b['dimensions']['width'] * $b['dimensions']['height'];
+  return $vol_b - $vol_a;
+}
+
+function _commerce_packing_get_product_list($line_items) {
+    $products = array();
+    foreach($line_items AS $item) {
+        $line_item_wrapper = entity_metadata_wrapper('commerce_line_item', $item->line_item_id);
+        $item_product = $line_item_wrapper->commerce_product->value();
+        // Get weight & dimensions for each product.
+        // To speed things up, assume that this will be the same for all products
+        // on the line items & only calcuate it once.
+        $d = commerce_physical_product_line_item_dimensions($item->line_item_id);
+        $w = _commerce_packing_physical_product_weight($item->line_item_id);
+        if ($d) { $product['dimensions'] = physical_dimensions_convert($d,'in'); }  //get product dimensions in inches
+        if ($w) { $product['weight'] = physical_weight_convert($w, 'lb'); } //get product weight (not line item weight) in pounds
+        // How many times does the product need added
+        // Is it a case or a single product
+        if ($item_product->type == 'wholesale_product') {
+          $product_qty = $line_item_wrapper->quantity->value() * $item_product->field_case_quantity[LANGUAGE_NONE][0]['value'];
+          $product['value'] = $item_product->commerce_price[LANGUAGE_NONE][0]['amount'] / $item_product->field_case_quantity[LANGUAGE_NONE][0]['value'];
+        } else {
+          $product_qty = $line_item_wrapper->quantity->value();
+          $product['value'] = $item_product->commerce_price[LANGUAGE_NONE][0]['amount'];
+        }
+
+        //add products from the line item one at at time
+        for($i=1; $i <= $product_qty; $i++) {
+            $products[] =  $product;  
+        }
+     }
+     usort($products, '_commerce_packing_sort_products');
+     return $products;
+}
+
+function _commerce_packing_get_box_sizes() {
+  $sizes = variable_get('commerce_packing_package_sizes',array('length'=>12, 'width'=>12, 'height'=>12, 'unit'=>'in'));
+  
+  foreach($sizes as $key=>$size) {
+    $sizes[$key] = physical_dimensions_convert($size, 'in');    
+  }
+  usort($sizes, '_commerce_packing_sort_boxes');
+  
+  return $sizes;
+}
+
+function commerce_packing_test_fit($topack, $container_size) {
+  $lp = new LAFFPack();
+
+  // Start packing our nice boxes
+  $lp->pack($topack, $container_size);
+  $c_size = $lp->get_container_dimensions();
+  
+  if ($container_size['height'] >= $c_size['height']) {
+    return 'yes';
+  } else {
+    return 'no';
+  }
+
+/*// Collect our container details
+  $c_size = $lp->get_container_dimensions();
+  $c_volume = $lp->get_container_volume();
+  $c_levels = $lp->get_levels();
+
+  // Collect remaining boxes details
+  $r_boxes = $lp->get_remaining_boxes();
+  $r_volume = $lp->get_remaining_volume();
+  $r_num_boxes = 0;
+  if(is_array($r_boxes)) {
+    foreach($r_boxes as $level)
+      $r_num_boxes += count($level);
+  }
+
+  // Collect packed boxes details
+  $p_boxes = $lp->get_packed_boxes();
+  $p_volume = $lp->get_packed_volume();
+  $p_num_boxes = 0;
+  if(is_array($p_boxes)) {
+    foreach($p_boxes as $level)
+      $p_num_boxes += count($level);
+  };
+    
+  // Calculate our waste
+  $w_volume = $c_volume - $p_volume;
+  $w_percent = $c_volume > 0 && $p_volume > 0 ? (($c_volume - $p_volume) / $c_volume) * 100 : 0;
+*/
+}
+
+/**
+ * Determines the weight to use for a product on an order. This is a slightly modified version of 
+ * commerce_physical_product_line_item_weight to get the weight of 1 product from the line item instead
+ * of the combined weight of all products.
+ *
+ * @param $containers
+ *   Containers that we need to convert the weight for.
+ *
+ */
+
+function _commerce_packing_convert_product_weight(&$containers) {
+  foreach ($containers as $key => $container) {
+    $containers[$key]['weight']['ounces'] = 16 * ($container['weight']['weight'] - floor($container['weight']['weight']));
+    $containers[$key]['weight']['pounds'] = floor($container['weight']['weight']);
+  }
+}

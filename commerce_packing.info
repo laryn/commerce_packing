@@ -1,0 +1,6 @@
+name = Commerce Packing (LAFF)
+description = Provides Drupal Commerce shipping modules with a uniform method of calculating packages.
+package = Commerce (shipping)
+dependencies[] = commerce
+dependencies[] = commerce_physical
+core = 7.x
