@@ -107,8 +107,6 @@ function commerce_packing_get_packages($order) {
 
   _commerce_packing_convert_product_weight($containers);
 
-  dsm($containers);
-  
   return $containers;
 }
 
@@ -171,6 +169,7 @@ function _commerce_packing_get_box_size($length, $width, $height) {
 }
 
 function _commerce_packing_sort_boxes($a, $b) {
+  
   $vol_a = $a['length'] * $a['width'] * $a['height'];    
   $vol_b = $b['length'] * $b['width'] * $b['height'];
   
@@ -186,6 +185,7 @@ function _commerce_packing_sort_products($a, $b) {
 function _commerce_packing_get_product_list($line_items) {
     $products = array();
     foreach($line_items AS $item) {
+      if ($item->type == 'product') {
         $line_item_wrapper = entity_metadata_wrapper('commerce_line_item', $item->line_item_id);
         $item_product = $line_item_wrapper->commerce_product->value();
         // Get weight & dimensions for each product.
@@ -209,9 +209,10 @@ function _commerce_packing_get_product_list($line_items) {
         for($i=1; $i <= $product_qty; $i++) {
             $products[] =  $product;  
         }
-     }
-     usort($products, '_commerce_packing_sort_products');
-     return $products;
+      }
+    }
+    usort($products, '_commerce_packing_sort_products');
+    return $products;
 }
 
 function _commerce_packing_get_box_sizes() {
@@ -221,7 +222,6 @@ function _commerce_packing_get_box_sizes() {
     $sizes[$key] = physical_dimensions_convert($size, 'in');    
   }
   usort($sizes, '_commerce_packing_sort_boxes');
-  
   return $sizes;
 }
 
